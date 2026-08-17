@@ -3,6 +3,9 @@ name: Super Lig TFF Sync
 on:
   workflow_dispatch:
 
+  schedule:
+    - cron: "*/15 * * * *"
+
 jobs:
   sync:
     runs-on: ubuntu-latest
