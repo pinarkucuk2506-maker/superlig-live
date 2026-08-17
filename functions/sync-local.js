@@ -1,13 +1,14 @@
+const fs = require("fs");
 const admin = require("firebase-admin");
-const axios = require("axios");
-const https = require("https");
 const cheerio = require("cheerio");
 const iconv = require("iconv-lite");
 
-const TFF_URL =
-  "https://www.tff.org/Default.aspx?pageID=198";
-
 const SEASON = "2026-2027";
+const TFF_FILE = "./tff-live.html";
+
+/* ---------------------------------------------------------
+   TAKIM İSMİ -> SLUG
+--------------------------------------------------------- */
 
 function slugify(name) {
   return name
@@ -25,17 +26,30 @@ function slugify(name) {
     .replace(/^-+|-+$/g, "");
 }
 
+/* ---------------------------------------------------------
+   TAKIM ADINI TEMİZLE
+--------------------------------------------------------- */
+
 function cleanTeamName(name) {
   return name
     .replace(/\s+A\.Ş\.$/i, "")
     .replace(/\s+FK$/i, "")
+    .replace(/\s+SK$/i, "")
     .trim();
 }
 
-function parseScore(text) {
-  const value = text.replace(/\s+/g, " ").trim();
+/* ---------------------------------------------------------
+   SKORU AYIR
+--------------------------------------------------------- */
 
-  const match = value.match(/^(\d+)\s*-\s*(\d+)$/);
+function parseScore(text) {
+  const value = text
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const match = value.match(
+    /^(\d+)\s*-\s*(\d+)$/
+  );
 
   if (!match) {
     return {
@@ -52,54 +66,68 @@ function parseScore(text) {
   };
 }
 
-async function fetchTffHtml() {
-  console.log("Yerel indirilen TFF HTML dosyası okunuyor...");
+/* ---------------------------------------------------------
+   TFF HTML DOSYASINI OKU
+--------------------------------------------------------- */
 
-  const fs = require("fs");
+function fetchTffHtml() {
+  console.log("TFF HTML dosyası okunuyor...");
+  console.log(`Dosya: ${TFF_FILE}`);
 
-  const filePath = "./tff-live.html";
-
-  if (!fs.existsSync(filePath)) {
+  if (!fs.existsSync(TFF_FILE)) {
     throw new Error(
-      `TFF HTML dosyası bulunamadı: ${filePath}`
+      `TFF HTML dosyası bulunamadı: ${TFF_FILE}`
     );
   }
 
-  const buffer = fs.readFileSync(filePath);
+  const buffer = fs.readFileSync(TFF_FILE);
 
+  console.log(
+    `TFF HTML byte: ${buffer.length}`
+  );
+
+  /*
+   * TFF sayfası Windows-1254 kullanıyor.
+   */
   const html = iconv.decode(
     buffer,
     "windows-1254"
   );
 
   console.log(
-    "TFF HTML byte:",
-    buffer.length
+    `TFF HTML karakter: ${html.length}`
   );
 
-  console.log(
-    "TFF HTML karakter:",
-    html.length
-  );
-
-  if (
-    !html.includes("2026-2027") ||
-    !html.includes("macId=")
-  ) {
+  /*
+   * Yanlış sayfa indirilmesini önle.
+   */
+  if (!html.includes("2026-2027")) {
     throw new Error(
-      "İndirilen dosya beklenen TFF Süper Lig HTML'i değil."
+      "TFF HTML içinde 2026-2027 sezonu bulunamadı."
+    );
+  }
+
+  if (!html.includes("macId=")) {
+    throw new Error(
+      "TFF HTML içinde macId bulunamadı."
     );
   }
 
   return html;
 }
 
+/* ---------------------------------------------------------
+   FİKSTÜRÜ PARSE ET
+--------------------------------------------------------- */
+
 function parseFixtures(html) {
   const $ = cheerio.load(html);
 
   const matches = [];
 
-  const fixtureTable = $("table.fiksturListesiTable").first();
+  const fixtureTable = $(
+    "table.fiksturListesiTable"
+  ).first();
 
   if (!fixtureTable.length) {
     throw new Error(
@@ -107,10 +135,12 @@ function parseFixtures(html) {
     );
   }
 
+  /*
+   * Her softBG tablo bir haftayı temsil ediyor.
+   */
   fixtureTable
     .find("table.softBG")
     .each((_, weekTable) => {
-
       const weekText = $(weekTable)
         .find("td.belirginYazi")
         .first()
@@ -118,33 +148,45 @@ function parseFixtures(html) {
         .replace(/\s+/g, " ")
         .trim();
 
-      const weekMatch =
-        weekText.match(/(\d+)\s*\.\s*Hafta/i);
+      const weekMatch = weekText.match(
+        /(\d+)\s*\.\s*Hafta/i
+      );
 
       if (!weekMatch) {
         return;
       }
 
-      const week = Number(weekMatch[1]);
+      const week = Number(
+        weekMatch[1]
+      );
 
+      /*
+       * Bu haftanın maçlarını bul.
+       */
       $(weekTable)
         .find("tr")
         .each((_, row) => {
-
-          const cells = $(row).children("td");
+          const cells =
+            $(row).children("td");
 
           if (cells.length !== 3) {
             return;
           }
 
           const homeAnchor =
-            $(cells[0]).find("a").first();
+            $(cells[0])
+              .find("a")
+              .first();
 
           const scoreAnchor =
-            $(cells[1]).find("a").first();
+            $(cells[1])
+              .find("a")
+              .first();
 
           const awayAnchor =
-            $(cells[2]).find("a").first();
+            $(cells[2])
+              .find("a")
+              .first();
 
           if (
             !homeAnchor.length ||
@@ -154,17 +196,21 @@ function parseFixtures(html) {
             return;
           }
 
-          const homeTeam = cleanTeamName(
-            homeAnchor.text()
-              .replace(/\s+/g, " ")
-              .trim()
-          );
+          const homeTeamName =
+            cleanTeamName(
+              homeAnchor
+                .text()
+                .replace(/\s+/g, " ")
+                .trim()
+            );
 
-          const awayTeam = cleanTeamName(
-            awayAnchor.text()
-              .replace(/\s+/g, " ")
-              .trim()
-          );
+          const awayTeamName =
+            cleanTeamName(
+              awayAnchor
+                .text()
+                .replace(/\s+/g, " ")
+                .trim()
+            );
 
           const href =
             scoreAnchor.attr("href") || "";
@@ -176,52 +222,76 @@ function parseFixtures(html) {
             return;
           }
 
-          const matchId = macIdMatch[1];
+          const matchId =
+            macIdMatch[1];
 
-          const score = parseScore(
-            scoreAnchor.text()
-          );
+          const score =
+            parseScore(
+              scoreAnchor.text()
+            );
 
+          /*
+           * Aynı maç birden fazla yerde bulunursa
+           * sadece bir kez ekle.
+           */
           if (
-            !matches.some(
-              (m) => m.matchId === matchId
+            matches.some(
+              (item) =>
+                item.matchId === matchId
             )
           ) {
-            matches.push({
-              matchId,
-
-              season: SEASON,
-              week,
-
-              homeTeam: slugify(homeTeam),
-              awayTeam: slugify(awayTeam),
-
-              homeTeamName: homeTeam,
-              awayTeamName: awayTeam,
-
-              homeScore: score.homeScore,
-              awayScore: score.awayScore,
-
-              status: score.status,
-
-              source: "TFF",
-            });
+            return;
           }
+
+          matches.push({
+            matchId,
+
+            season: SEASON,
+            week,
+
+            homeTeam:
+              slugify(homeTeamName),
+
+            awayTeam:
+              slugify(awayTeamName),
+
+            homeTeamName,
+            awayTeamName,
+
+            homeScore:
+              score.homeScore,
+
+            awayScore:
+              score.awayScore,
+
+            status:
+              score.status,
+
+            source: "TFF",
+          });
         });
     });
 
   return matches;
 }
 
+/* ---------------------------------------------------------
+   PUAN CETVELİ OLUŞTUR
+--------------------------------------------------------- */
+
 function createStandings(matches) {
   const teams = new Map();
 
-  function ensureTeam(slug, name) {
+  function ensureTeam(
+    slug,
+    name
+  ) {
     if (!teams.has(slug)) {
       teams.set(slug, {
         teamName: name,
 
         played: 0,
+
         wins: 0,
         draws: 0,
         losses: 0,
@@ -237,8 +307,10 @@ function createStandings(matches) {
     return teams.get(slug);
   }
 
+  /*
+   * Önce bütün takımları oluştur.
+   */
   for (const match of matches) {
-
     ensureTeam(
       match.homeTeam,
       match.homeTeamName
@@ -248,60 +320,93 @@ function createStandings(matches) {
       match.awayTeam,
       match.awayTeamName
     );
+  }
 
+  /*
+   * Sadece oynanmış maçları hesapla.
+   */
+  for (const match of matches) {
     if (
-      match.status !== "finished" ||
+      match.status !==
+        "finished" ||
       match.homeScore === null ||
       match.awayScore === null
     ) {
       continue;
     }
 
-    const home = teams.get(
-      match.homeTeam
-    );
+    const home =
+      teams.get(
+        match.homeTeam
+      );
 
-    const away = teams.get(
-      match.awayTeam
-    );
+    const away =
+      teams.get(
+        match.awayTeam
+      );
 
-    home.played++;
-    away.played++;
+    home.played += 1;
+    away.played += 1;
 
-    home.goalsFor += match.homeScore;
-    home.goalsAgainst += match.awayScore;
+    home.goalsFor +=
+      match.homeScore;
 
-    away.goalsFor += match.awayScore;
-    away.goalsAgainst += match.homeScore;
+    home.goalsAgainst +=
+      match.awayScore;
 
-    if (match.homeScore > match.awayScore) {
-      home.wins++;
+    away.goalsFor +=
+      match.awayScore;
+
+    away.goalsAgainst +=
+      match.homeScore;
+
+    /*
+     * Ev sahibi kazandı.
+     */
+    if (
+      match.homeScore >
+      match.awayScore
+    ) {
+      home.wins += 1;
       home.points += 3;
 
-      away.losses++;
+      away.losses += 1;
     }
+
+    /*
+     * Deplasman kazandı.
+     */
     else if (
-      match.homeScore < match.awayScore
+      match.homeScore <
+      match.awayScore
     ) {
-      away.wins++;
+      away.wins += 1;
       away.points += 3;
 
-      home.losses++;
+      home.losses += 1;
     }
-    else {
-      home.draws++;
-      away.draws++;
 
-      home.points++;
-      away.points++;
+    /*
+     * Beraberlik.
+     */
+    else {
+      home.draws += 1;
+      away.draws += 1;
+
+      home.points += 1;
+      away.points += 1;
     }
   }
 
   const standings = [];
 
-  for (const [slug, data] of teams) {
+  for (
+    const [slug, data]
+    of teams
+  ) {
     data.goalDifference =
-      data.goalsFor - data.goalsAgainst;
+      data.goalsFor -
+      data.goalsAgainst;
 
     standings.push({
       slug,
@@ -309,97 +414,175 @@ function createStandings(matches) {
     });
   }
 
-  standings.sort((a, b) => {
-    if (b.points !== a.points) {
-      return b.points - a.points;
-    }
+  /*
+   * Temel sıralama:
+   * 1. Puan
+   * 2. Averaj
+   * 3. Atılan gol
+   */
+  standings.sort(
+    (a, b) => {
+      if (
+        b.points !==
+        a.points
+      ) {
+        return (
+          b.points -
+          a.points
+        );
+      }
 
-    if (
-      b.goalDifference !==
-      a.goalDifference
-    ) {
-      return (
-        b.goalDifference -
+      if (
+        b.goalDifference !==
         a.goalDifference
+      ) {
+        return (
+          b.goalDifference -
+          a.goalDifference
+        );
+      }
+
+      if (
+        b.goalsFor !==
+        a.goalsFor
+      ) {
+        return (
+          b.goalsFor -
+          a.goalsFor
+        );
+      }
+
+      return a.teamName.localeCompare(
+        b.teamName,
+        "tr"
       );
     }
+  );
 
-    return (
-      b.goalsFor -
-      a.goalsFor
-    );
-  });
-
+  /*
+   * Sıra numarası.
+   */
   standings.forEach(
     (team, index) => {
-      team.rank = index + 1;
+      team.rank =
+        index + 1;
     }
   );
 
   return standings;
 }
 
-async function saveMatches(db, matches) {
+/* ---------------------------------------------------------
+   MATCHES -> FIRESTORE
+--------------------------------------------------------- */
+
+async function saveMatches(
+  db,
+  matches
+) {
   console.log(
     `Firestore'a ${matches.length} maç yazılıyor...`
   );
 
+  /*
+   * Firestore batch maksimum 500 işlem.
+   * Güvenli tarafta kalmak için 400 kullanıyoruz.
+   */
   for (
     let i = 0;
     i < matches.length;
     i += 400
   ) {
     const chunk =
-      matches.slice(i, i + 400);
+      matches.slice(
+        i,
+        i + 400
+      );
 
-    const batch = db.batch();
+    const batch =
+      db.batch();
 
-    for (const match of chunk) {
-
-      const ref = db
-        .collection("matches")
-        .doc(match.matchId);
+    for (
+      const match of chunk
+    ) {
+      const ref =
+        db
+          .collection(
+            "matches"
+          )
+          .doc(
+            match.matchId
+          );
 
       batch.set(
         ref,
         {
-          season: match.season,
-          week: match.week,
+          season:
+            match.season,
 
-          homeTeam: match.homeTeam,
-          awayTeam: match.awayTeam,
+          week:
+            match.week,
+
+          homeTeam:
+            match.homeTeam,
+
+          awayTeam:
+            match.awayTeam,
 
           homeTeamName:
             match.homeTeamName,
+
           awayTeamName:
             match.awayTeamName,
 
           homeScore:
             match.homeScore,
+
           awayScore:
             match.awayScore,
 
-          status: match.status,
+          status:
+            match.status,
 
-          source: "TFF",
+          source:
+            "TFF",
 
           updatedAt:
             admin.firestore
               .FieldValue
               .serverTimestamp(),
         },
-        { merge: true }
+        {
+          merge: true,
+        }
       );
     }
 
     await batch.commit();
+
+    console.log(
+      `Maç batch tamamlandı: ${i + 1}-${Math.min(
+        i + chunk.length,
+        matches.length
+      )}`
+    );
   }
 }
 
-async function saveTeams(db, matches) {
-  const teams = new Map();
+/* ---------------------------------------------------------
+   TEAMS -> FIRESTORE
+--------------------------------------------------------- */
 
-  for (const match of matches) {
+async function saveTeams(
+  db,
+  matches
+) {
+  const teams =
+    new Map();
+
+  for (
+    const match of matches
+  ) {
     teams.set(
       match.homeTeam,
       match.homeTeamName
@@ -411,29 +594,38 @@ async function saveTeams(db, matches) {
     );
   }
 
-  const batch = db.batch();
+  console.log(
+    `Takım sayısı: ${teams.size}`
+  );
+
+  const batch =
+    db.batch();
 
   for (
-    const [slug, name] of teams
+    const [slug, name]
+    of teams
   ) {
-    const ref = db
-      .collection("teams")
-      .doc(slug);
+    const ref =
+      db
+        .collection("teams")
+        .doc(slug);
+
+    /*
+     * Şimdilik slug'dan kısa isim üret.
+     * Daha sonra TFF kulüp kodlarından
+     * gerçek kısa isimleri kullanabiliriz.
+     */
+    const shortName =
+      createShortName(
+        name
+      );
 
     batch.set(
       ref,
       {
         name,
-        shortName: slug
-          .split("-")
-          .map(
-            part =>
-              part
-                .charAt(0)
-                .toUpperCase()
-          )
-          .join("")
-          .slice(0, 4),
+
+        shortName,
 
         slug,
 
@@ -444,18 +636,104 @@ async function saveTeams(db, matches) {
             .FieldValue
             .serverTimestamp(),
       },
-      { merge: true }
+      {
+        merge: true,
+      }
     );
   }
 
   await batch.commit();
-
-  console.log(
-    `Takım sayısı: ${teams.size}`
-  );
 }
 
-async function saveStandings(db, standings) {
+/* ---------------------------------------------------------
+   TAKIM KISA ADI
+--------------------------------------------------------- */
+
+function createShortName(
+  name
+) {
+  const known = {
+    "GALATASARAY":
+      "GS",
+
+    "FENERBAHÇE":
+      "FB",
+
+    "BEŞİKTAŞ":
+      "BJK",
+
+    "TRABZONSPOR":
+      "TS",
+
+    "GÖZTEPE":
+      "GÖZ",
+
+    "SAMSUNSPOR":
+      "SAM",
+
+    "EYÜPSPOR":
+      "EYÜP",
+
+    "KOCAELİSPOR":
+      "KMS",
+
+    "GENÇLERBİRLİĞİ":
+      "GEN",
+
+    "KASIMPAŞA":
+      "KAS",
+
+    "ERZURUMSPOR":
+      "ERZ",
+
+    "ÇAYKUR RİZESPOR":
+      "RİZE",
+
+    "TÜMOSAN KONYASPOR":
+      "KON",
+
+    "GAZİANTEP FUTBOL KULÜBÜ":
+      "GFK",
+
+    "CORENDON ALANYASPOR":
+      "ALA",
+
+    "İSTANBUL BAŞAKŞEHİR":
+      "IBFK",
+
+    "AMED SPORTİF FAALİYETLER":
+      "AMED",
+
+    "ARCA ÇORUM":
+      "ÇORUM",
+  };
+
+  if (
+    known[name]
+  ) {
+    return known[name];
+  }
+
+  return name
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(
+      (word) =>
+        word.charAt(0)
+    )
+    .join("")
+    .toUpperCase()
+    .slice(0, 4);
+}
+
+/* ---------------------------------------------------------
+   STANDINGS -> FIRESTORE
+--------------------------------------------------------- */
+
+async function saveStandings(
+  db,
+  standings
+) {
   console.log(
     `Puan cetveli: ${standings.length} takım`
   );
@@ -466,15 +744,25 @@ async function saveStandings(db, standings) {
     i += 400
   ) {
     const chunk =
-      standings.slice(i, i + 400);
+      standings.slice(
+        i,
+        i + 400
+      );
 
-    const batch = db.batch();
+    const batch =
+      db.batch();
 
-    for (const team of chunk) {
-
-      const ref = db
-        .collection("standings")
-        .doc(team.slug);
+    for (
+      const team of chunk
+    ) {
+      const ref =
+        db
+          .collection(
+            "standings"
+          )
+          .doc(
+            team.slug
+          );
 
       batch.set(
         ref,
@@ -482,7 +770,8 @@ async function saveStandings(db, standings) {
           teamName:
             team.teamName,
 
-          rank: team.rank,
+          rank:
+            team.rank,
 
           played:
             team.played,
@@ -508,14 +797,17 @@ async function saveStandings(db, standings) {
           points:
             team.points,
 
-          season: SEASON,
+          season:
+            SEASON,
 
           updatedAt:
             admin.firestore
               .FieldValue
               .serverTimestamp(),
         },
-        { merge: true }
+        {
+          merge: true,
+        }
       );
     }
 
@@ -523,19 +815,33 @@ async function saveStandings(db, standings) {
   }
 }
 
-async function main() {
+/* ---------------------------------------------------------
+   FIRESTORE
+--------------------------------------------------------- */
+
+function initializeFirebase() {
   if (
-    !process.env.FIREBASE_SERVICE_ACCOUNT
+    !process.env
+      .FIREBASE_SERVICE_ACCOUNT
   ) {
     throw new Error(
       "FIREBASE_SERVICE_ACCOUNT secret bulunamadı."
     );
   }
 
-  const serviceAccount =
-    JSON.parse(
-      process.env.FIREBASE_SERVICE_ACCOUNT
+  let serviceAccount;
+
+  try {
+    serviceAccount =
+      JSON.parse(
+        process.env
+          .FIREBASE_SERVICE_ACCOUNT
+      );
+  } catch (error) {
+    throw new Error(
+      "FIREBASE_SERVICE_ACCOUNT geçerli JSON değil."
     );
+  }
 
   admin.initializeApp({
     credential:
@@ -544,28 +850,78 @@ async function main() {
       ),
   });
 
+  return admin.firestore();
+}
+
+/* ---------------------------------------------------------
+   ANA PROGRAM
+--------------------------------------------------------- */
+
+async function main() {
+  console.log("");
+  console.log(
+    "========================================"
+  );
+  console.log(
+    "SUPER LIG TFF SENKRONIZASYONU"
+  );
+  console.log(
+    "========================================"
+  );
+  console.log(
+    `Sezon: ${SEASON}`
+  );
+  console.log("");
+
+  /*
+   * Firebase bağlantısı.
+   */
   const db =
-    admin.firestore();
+    initializeFirebase();
 
+  /*
+   * TFF HTML dosyasını oku.
+   */
   const html =
-    await fetchTffHtml();
+    fetchTffHtml();
 
+  /*
+   * Maçları parse et.
+   */
   const matches =
     parseFixtures(html);
 
+  console.log("");
   console.log(
     `Bulunan maç: ${matches.length}`
   );
 
-  if (matches.length !== 306) {
+  /*
+   * 18 takım x 17 rakip =
+   * 306 maç.
+   *
+   * Eksik veri varsa Firestore'a
+   * yazmadan işlemi durdur.
+   */
+  if (
+    matches.length !== 306
+  ) {
     throw new Error(
-      `Beklenen 306 maç yerine ${matches.length} maç bulundu.`
+      `Beklenen 306 maç yerine ${matches.length} maç bulundu. Firestore güncellenmedi.`
     );
   }
 
+  /*
+   * Puan cetvelini hesapla.
+   */
   const standings =
-    createStandings(matches);
+    createStandings(
+      matches
+    );
 
+  /*
+   * Firestore'a yaz.
+   */
   await saveMatches(
     db,
     matches
@@ -581,35 +937,65 @@ async function main() {
     standings
   );
 
+  /*
+   * Sistem ayarları.
+   */
   await db
     .collection("settings")
     .doc("season")
     .set(
       {
-        currentSeason: SEASON,
+        currentSeason:
+          SEASON,
+
         matchCount:
           matches.length,
+
+        teamCount:
+          standings.length,
+
         lastSyncAt:
           admin.firestore
             .FieldValue
             .serverTimestamp(),
       },
-      { merge: true }
+      {
+        merge: true,
+      }
     );
 
   console.log("");
   console.log(
+    "========================================"
+  );
+  console.log(
     "✅ TFF SENKRONİZASYONU TAMAMLANDI"
   );
+  console.log(
+    "========================================"
+  );
 }
+
+/* ---------------------------------------------------------
+   HATA YAKALA
+--------------------------------------------------------- */
 
 main().catch(
   (error) => {
     console.error("");
     console.error(
+      "========================================"
+    );
+    console.error(
       "❌ SENKRONİZASYON HATASI"
     );
-    console.error(error);
+    console.error(
+      "========================================"
+    );
+    console.error(
+      error
+    );
+
     process.exitCode = 1;
   }
 );
