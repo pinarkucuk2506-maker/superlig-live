@@ -22,6 +22,17 @@ jobs:
         working-directory: functions
         run: npm ci
 
+      - name: TFF sayfasını indir
+        working-directory: functions
+        run: |
+          curl -L -k --fail \
+            -A "Mozilla/5.0" \
+            "https://www.tff.org/Default.aspx?pageID=198" \
+            -o tff-live.html
+
+          echo "TFF dosyası indirildi:"
+          ls -lh tff-live.html
+
       - name: TFF verisini Firestore'a aktar
         working-directory: functions
         env:
