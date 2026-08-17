@@ -1,5 +1,6 @@
 const admin = require("firebase-admin");
 const axios = require("axios");
+const https = require("https");
 const cheerio = require("cheerio");
 const iconv = require("iconv-lite");
 
@@ -54,12 +55,23 @@ function parseScore(text) {
 async function fetchTffHtml() {
   console.log("TFF sayfası indiriliyor...");
 
+  // TFF sunucusunun sertifika zinciri GitHub Runner
+  // tarafından doğrulanamıyor.
+  // Bu istisna yalnızca TFF bağlantısı için kullanılıyor.
+  const tffAgent = new https.Agent({
+    rejectUnauthorized: false,
+  });
+
   const response = await axios.get(TFF_URL, {
     responseType: "arraybuffer",
     timeout: 30000,
+
+    httpsAgent: tffAgent,
+
     headers: {
       "User-Agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36",
+
       Accept:
         "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     },
@@ -68,10 +80,23 @@ async function fetchTffHtml() {
   console.log("HTTP:", response.status);
   console.log("HTML byte:", response.data.length);
 
-  return iconv.decode(
+  const html = iconv.decode(
     Buffer.from(response.data),
     "windows-1254"
   );
+
+  // Yanlış bir sayfa gelmesini engellemek için
+  // TFF sayfasının temel işaretlerini kontrol ediyoruz.
+  if (
+    !html.includes("2026-2027") ||
+    !html.includes("macId=")
+  ) {
+    throw new Error(
+      "TFF'den beklenen Süper Lig HTML'i alınamadı."
+    );
+  }
+
+  return html;
 }
 
 function parseFixtures(html) {
