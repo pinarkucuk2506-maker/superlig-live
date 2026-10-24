@@ -380,13 +380,34 @@ async function enrichMatchDetails(db, matches) {
   const existingById = new Map();
   existingSnapshot.forEach((doc) => existingById.set(doc.id, doc.data()));
 
+  const DETAIL_RECHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+  const nowMs = Date.now();
+
   const pending = matches.filter((match) => {
     const old = existingById.get(match.matchId) || {};
     match.matchDate = old.matchDate || null;
     match.matchTime = old.matchTime || null;
     match.referee = old.referee || null;
     match.stadium = old.stadium || null;
-    return !(match.matchDate && match.matchTime && match.referee && match.stadium);
+    match.detailsCheckedAt = old.detailsCheckedAt || null;
+
+    // Tarih/saat/hakem/stadyumdan biri eksik olabilir; ancak TFF her bilgiyi
+    // aynı anda açıklamaz. Aynı eksik maçları her 15 dakikada yeniden indirme.
+    if (match.matchDate && match.matchTime && match.referee && match.stadium) {
+      return false;
+    }
+
+    const checkedAt = old.detailsCheckedAt;
+    let checkedAtMs = 0;
+    if (checkedAt && typeof checkedAt.toDate === "function") {
+      checkedAtMs = checkedAt.toDate().getTime();
+    } else if (checkedAt instanceof Date) {
+      checkedAtMs = checkedAt.getTime();
+    } else if (typeof checkedAt === "number") {
+      checkedAtMs = checkedAt;
+    }
+
+    return !checkedAtMs || (nowMs - checkedAtMs) >= DETAIL_RECHECK_INTERVAL_MS;
   });
 
   console.log(`Detay bilgisi eksik maç: ${pending.length}`);
@@ -404,11 +425,14 @@ async function enrichMatchDetails(db, matches) {
         for (const key of ["matchDate", "matchTime", "referee", "stadium"]) {
           if (details[key]) match[key] = details[key];
         }
-        if (details.matchDate || details.referee || details.stadium) successCount++;
+        if (details.matchDate || details.matchTime || details.referee || details.stadium) successCount++;
         else failCount++;
       } catch (error) {
         failCount++;
         console.warn(`Maç detayı alınamadı (${match.matchId}): ${error.message}`);
+      } finally {
+        // Başarılı/başarısız her kontrolü kaydet; eksik bilgi varsa 24 saat sonra tekrar dene.
+        match.detailsCheckedAt = new Date();
       }
       // TFF sunucusuna yük bindirmemek ve geçici bağlantı hatalarını azaltmak için bekle.
       await new Promise((resolve) => setTimeout(resolve, 700));
@@ -693,6 +717,7 @@ async function saveMatches(
           ...(match.matchTime ? { matchTime: match.matchTime } : {}),
           ...(match.referee ? { referee: match.referee } : {}),
           ...(match.stadium ? { stadium: match.stadium } : {}),
+          ...(match.detailsCheckedAt ? { detailsCheckedAt: match.detailsCheckedAt } : {}),
 
           source:
             "TFF",
