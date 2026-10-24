@@ -280,7 +280,8 @@ function parseFixtures(html) {
 --------------------------------------------------------- */
 
 const TFF_DETAIL_BASE = "https://www.tff.org/Default.aspx?pageID=29&macId=";
-const DETAIL_CONCURRENCY = 4;
+const DETAIL_CONCURRENCY = 2;
+const DETAIL_RETRIES = 3;
 
 function cleanText(value) {
   return String(value || "")
@@ -291,16 +292,37 @@ function cleanText(value) {
 
 async function fetchMatchDetails(matchId) {
   const url = `${TFF_DETAIL_BASE}${encodeURIComponent(matchId)}`;
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (compatible; SuperLigLive/1.0)",
-      "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
-    },
-    signal: AbortSignal.timeout(15000),
-  });
+  let response = null;
+  let lastError = null;
 
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status} (${matchId})`);
+  // TFF bağlantısı geçici olarak başarısız olursa artan bekleme süresiyle yeniden dene.
+  for (let attempt = 1; attempt <= DETAIL_RETRIES; attempt++) {
+    try {
+      response = await fetch(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
+          "Referer": "https://www.tff.org/Default.aspx?pageID=198",
+        },
+        signal: AbortSignal.timeout(20000),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status} (${matchId})`);
+      }
+      break;
+    } catch (error) {
+      lastError = error;
+      if (attempt < DETAIL_RETRIES) {
+        const delayMs = 1000 * attempt;
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+
+  if (!response || !response.ok) {
+    throw lastError || new Error(`TFF detay sayfası alınamadı (${matchId})`);
   }
 
   const buffer = Buffer.from(await response.arrayBuffer());
@@ -388,8 +410,8 @@ async function enrichMatchDetails(db, matches) {
         failCount++;
         console.warn(`Maç detayı alınamadı (${match.matchId}): ${error.message}`);
       }
-      // TFF sunucusuna yük bindirmemek için istekler arasında kısa bekleme.
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      // TFF sunucusuna yük bindirmemek ve geçici bağlantı hatalarını azaltmak için bekle.
+      await new Promise((resolve) => setTimeout(resolve, 700));
     }
   }
 
