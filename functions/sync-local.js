@@ -276,6 +276,129 @@ function parseFixtures(html) {
 }
 
 /* ---------------------------------------------------------
+   TFF MAÇ DETAYI: TARİH / SAAT / HAKEM / STADYUM
+--------------------------------------------------------- */
+
+const TFF_DETAIL_BASE = "https://www.tff.org/Default.aspx?pageID=29&macId=";
+const DETAIL_CONCURRENCY = 4;
+
+function cleanText(value) {
+  return String(value || "")
+    .replace(/\u00a0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function fetchMatchDetails(matchId) {
+  const url = `${TFF_DETAIL_BASE}${encodeURIComponent(matchId)}`;
+  const response = await fetch(url, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (compatible; SuperLigLive/1.0)",
+      "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
+    },
+    signal: AbortSignal.timeout(15000),
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} (${matchId})`);
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+  const html = iconv.decode(buffer, "windows-1254");
+  const $ = cheerio.load(html);
+  const bodyHtml = $("body").html() || html;
+  const textWithLines = bodyHtml
+    .replace(/<br\s*\/?\s*>/gi, "\n")
+    .replace(/<\/(?:div|p|li|tr|td|h[1-6]|table|section|article)\s*>/gi, "\n")
+    .replace(/<[^>]+>/g, " ");
+  const lines = textWithLines
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map(cleanText)
+    .filter(Boolean);
+  const allText = cleanText(lines.join(" "));
+
+  const dateMatch = allText.match(/\b(\d{2}\.\d{2}\.\d{4})\s*[-–]\s*(\d{1,2}:\d{2})\b/);
+  const details = {
+    matchDate: dateMatch ? dateMatch[1] : null,
+    matchTime: dateMatch ? dateMatch[2] : null,
+    referee: null,
+    stadium: null,
+  };
+
+  // Hakem satırını doğrudan metin düğümünden bul; isim tahmin etme.
+  const refereeNode = $("body").find("*").contents().filter(function () {
+    return this.type === "text" && /\(\s*Hakem\s*\)/i.test(this.data || "");
+  }).first();
+  if (refereeNode.length) {
+    details.referee = cleanText(refereeNode.text())
+      .replace(/\s*\(\s*Hakem\s*\)/i, "") || null;
+  } else {
+    const refereeMatch = allText.match(/([\p{L}.'’-]+(?:\s+[\p{L}.'’-]+){1,4})\s*\(\s*Hakem\s*\)/iu);
+    if (refereeMatch) details.referee = cleanText(refereeMatch[1]);
+  }
+
+  // Tarih satırından hemen önceki uygun satır genellikle stadyum/şehir bilgisidir.
+  const dateLineIndex = lines.findIndex((line) => /\b\d{2}\.\d{2}\.\d{4}\s*[-–]\s*\d{1,2}:\d{2}\b/.test(line));
+  if (dateLineIndex > 0) {
+    const candidate = lines[dateLineIndex - 1];
+    if (candidate.length >= 5 && !/^(maç kodu|trendyol süper lig|hakem)$/i.test(candidate)) {
+      details.stadium = candidate.replace(/^⚑\s*/, "").trim() || null;
+    }
+  }
+
+  return details;
+}
+
+async function enrichMatchDetails(db, matches) {
+  console.log("Mevcut maç detayları kontrol ediliyor...");
+  const existingSnapshot = await db.collection("matches")
+    .where("season", "==", SEASON)
+    .get();
+  const existingById = new Map();
+  existingSnapshot.forEach((doc) => existingById.set(doc.id, doc.data()));
+
+  const pending = matches.filter((match) => {
+    const old = existingById.get(match.matchId) || {};
+    match.matchDate = old.matchDate || null;
+    match.matchTime = old.matchTime || null;
+    match.referee = old.referee || null;
+    match.stadium = old.stadium || null;
+    return !(match.matchDate && match.matchTime && match.referee && match.stadium);
+  });
+
+  console.log(`Detay bilgisi eksik maç: ${pending.length}`);
+  let nextIndex = 0;
+  let successCount = 0;
+  let failCount = 0;
+
+  async function worker() {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= pending.length) return;
+      const match = pending[index];
+      try {
+        const details = await fetchMatchDetails(match.matchId);
+        for (const key of ["matchDate", "matchTime", "referee", "stadium"]) {
+          if (details[key]) match[key] = details[key];
+        }
+        if (details.matchDate || details.referee || details.stadium) successCount++;
+        else failCount++;
+      } catch (error) {
+        failCount++;
+        console.warn(`Maç detayı alınamadı (${match.matchId}): ${error.message}`);
+      }
+      // TFF sunucusuna yük bindirmemek için istekler arasında kısa bekleme.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(DETAIL_CONCURRENCY, pending.length) }, () => worker()));
+  console.log(`Detay sayfası okunan maç: ${successCount}; eksik/başarısız: ${failCount}`);
+  return matches;
+}
+
+/* ---------------------------------------------------------
    PUAN CETVELİ OLUŞTUR
 --------------------------------------------------------- */
 
@@ -543,6 +666,11 @@ async function saveMatches(
 
           status:
             match.status,
+
+          ...(match.matchDate ? { matchDate: match.matchDate } : {}),
+          ...(match.matchTime ? { matchTime: match.matchTime } : {}),
+          ...(match.referee ? { referee: match.referee } : {}),
+          ...(match.stadium ? { stadium: match.stadium } : {}),
 
           source:
             "TFF",
@@ -910,6 +1038,12 @@ async function main() {
       `Beklenen 306 maç yerine ${matches.length} maç bulundu. Firestore güncellenmedi.`
     );
   }
+
+  /*
+   * TFF maç detaylarından tarih, saat, hakem ve stadyum bilgilerini tamamla.
+   * Firestore'da mevcut ve eksiksiz bilgiler yeniden indirilmez.
+   */
+  await enrichMatchDetails(db, matches);
 
   /*
    * Puan cetvelini hesapla.
