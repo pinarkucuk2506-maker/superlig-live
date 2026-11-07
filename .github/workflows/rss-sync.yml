@@ -1,0 +1,27 @@
+name: SuperLigLive Haber RSS Sync
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"
+
+jobs:
+  rss-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Repository'yi indir
+        uses: actions/checkout@v5
+      - name: Node.js kur
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: functions/package-lock.json
+      - name: Bağımlılıkları yükle
+        working-directory: functions
+        run: npm ci
+      - name: RSS haberlerini Firestore'a aktar
+        working-directory: functions
+        env:
+          FIREBASE_SERVICE_ACCOUNT: \${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: node rss-sync.js
