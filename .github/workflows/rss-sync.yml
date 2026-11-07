@@ -23,5 +23,5 @@ jobs:
       - name: RSS haberlerini Firestore'a aktar
         working-directory: functions
         env:
-          FIREBASE_SERVICE_ACCOUNT: \${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         run: node rss-sync.js
